@@ -9940,7 +9940,7 @@ VteTerminalPrivate::widget_scroll(GdkEventScroll *event)
 	_vte_debug_print(VTE_DEBUG_EVENTS,
 			"Scroll speed is %d lines per non-smooth scroll unit\n",
 			(int) v);
-	if (m_screen == &m_alternate_screen &&
+	if (0 && m_screen == &m_alternate_screen &&
             m_alternate_screen_scroll) {
 		char *normal;
 		gssize normal_length;
