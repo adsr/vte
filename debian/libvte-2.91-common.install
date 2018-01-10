@@ -1,0 +1,3 @@
+usr/share/locale
+debian/xterm usr/share/vte/termcap-2.91/
+etc/profile.d/

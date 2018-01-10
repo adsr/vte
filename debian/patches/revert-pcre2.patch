@@ -1,0 +1,1625 @@
+From 08bbf3a8f7876955235368fc677e1a31dbd15b5b Mon Sep 17 00:00:00 2001
+From: Jeremy Bicha <jbicha@ubuntu.com>
+Date: Sun, 19 Feb 2017 22:49:25 -0500
+Subject: Revert commits that require PCRE2
+
+Bug-Ubuntu: https://launchpad.net/bugs/1636666
+
+Squashed revert of these commits:
+https://git.gnome.org/browse/vte/commit/?id=2b93575d
+https://git.gnome.org/browse/vte/commit/?id=b00caee6
+https://git.gnome.org/browse/vte/commit/?id=4c0d8533
+https://git.gnome.org/browse/vte/commit/?id=4003f01e
+https://git.gnome.org/browse/vte/commit/?id=00f25272
+
+---
+ bindings/vala/Makefile.am |   4 +
+ bindings/vala/app.vala    |  51 +++--
+ configure.ac              |  23 ++-
+ src/vte.cc                | 475 ++++++++++++++++++++++++++++++++++++++++------
+ src/vteapp.c              |  21 +-
+ src/vtegtk.cc             |  89 +++++----
+ src/vteinternal.hh        |  59 +++++-
+ src/vteregex.cc           | 158 +++++----------
+ src/vteregexinternal.hh   |  10 +-
+ 9 files changed, 657 insertions(+), 233 deletions(-)
+
+diff --git a/bindings/vala/Makefile.am b/bindings/vala/Makefile.am
+index 413e8c6..e308b5a 100644
+--- a/bindings/vala/Makefile.am
++++ b/bindings/vala/Makefile.am
+@@ -81,6 +81,10 @@ if HAVE_GTK_3_16
+ vte_@VTE_API_MAJOR_VERSION@_@VTE_API_MINOR_VERSION@_VALAFLAGS += -D GTK_3_16
+ endif
+ 
++if WITH_PCRE2
++vte_@VTE_API_MAJOR_VERSION@_@VTE_API_MINOR_VERSION@_VALAFLAGS += -D WITH_PCRE2
++endif
++
+ CLEANFILES += \
+ 	app.c \
+ 	appresources.c \
+diff --git a/bindings/vala/app.vala b/bindings/vala/app.vala
+index 58698f9..275ae3a 100644
+--- a/bindings/vala/app.vala
++++ b/bindings/vala/app.vala
+@@ -36,8 +36,12 @@ class SearchPopover : Gtk.Popover
+   [GtkChild] private Gtk.Revealer revealer;
+ 
+   private bool regex_caseless = false;
++  private bool regex_multiline = false;
+   private string? regex_pattern = null;
+-  private bool has_regex = false;
++  private GLib.Regex? regex_gregex = null;
++#if WITH_PCRE2
++  private Vte.Regex? regex_regex = null;
++#endif
+ 
+   public SearchPopover(Vte.Terminal term,
+                        Gtk.Widget relative_to)
+@@ -69,7 +73,11 @@ class SearchPopover : Gtk.Popover
+ 
+   private bool have_regex()
+   {
+-	return has_regex;
++    return regex_gregex != null
++#if WITH_PCRE2
++      || regex_regex != null
++#endif
++      ;
+   }
+ 
+   private void update_sensitivity()
+@@ -85,14 +93,18 @@ class SearchPopover : Gtk.Popover
+     string search_text;
+     string pattern = null;
+     bool caseless = false;
++    bool multiline = false;
+     GLib.Regex? gregex = null;
++#if WITH_PCRE2
+     Vte.Regex? regex = null;
++#endif
+ 
+     search_text = search_entry.get_text();
+     caseless = !match_case_checkbutton.active;
+ 
+     if (regex_checkbutton.active) {
+       pattern = search_text;
++      multiline = true;
+     } else {
+       pattern = GLib.Regex.escape_string(search_text);
+     }
+@@ -101,20 +113,25 @@ class SearchPopover : Gtk.Popover
+       pattern = "\\b" + pattern + "\\b";
+ 
+     if (caseless == regex_caseless &&
++        multiline == regex_multiline &&
+         pattern == regex_pattern)
+       return;
+ 
+     regex_pattern = null;
+     regex_caseless = caseless;
++    regex_multiline = multiline;
+ 
+     if (search_text.length != 0) {
+       try {
++#if WITH_PCRE2
+         if (!App.Options.no_pcre) {
+           uint32 flags;
+ 
+-          flags = 0x40080400u /* PCRE2_UTF | PCRE2_NO_UTF_CHECK | PCRE2_MULTILINE */;
++          flags = 0x40080000u /* PCRE2_UTF | PCRE2_NO_UTF_CHECK */;
+           if (caseless)
+             flags |= 0x00000008u; /* PCRE2_CASELESS */
++          if (multiline)
++            flags |= 0x00000400u; /* PCRE2_MULTILINE */
+           regex = new Vte.Regex.for_search(pattern, pattern.length, flags);
+ 
+           try {
+@@ -124,13 +141,16 @@ class SearchPopover : Gtk.Popover
+             if (e.code != -45 /* PCRE2_ERROR_JIT_BADOPTION */) /* JIT not supported */
+               printerr("JITing regex \"%s\" failed: %s\n", pattern, e.message);
+           }
+-        } else {
++        } else
++#endif /* WITH_PCRE2 */
++        {
+           GLib.RegexCompileFlags flags;
+ 
+-          flags = GLib.RegexCompileFlags.OPTIMIZE |
+-                  GLib.RegexCompileFlags.MULTILINE;
++          flags = GLib.RegexCompileFlags.OPTIMIZE;
+           if (caseless)
+             flags |= GLib.RegexCompileFlags.CASELESS;
++          if (multiline)
++            flags |= GLib.RegexCompileFlags.MULTILINE;
+ 
+           gregex = new GLib.Regex(pattern, flags, 0);
+         }
+@@ -138,23 +158,26 @@ class SearchPopover : Gtk.Popover
+         regex_pattern = pattern;
+         search_entry.set_tooltip_text(null);
+       } catch (Error e) {
++#if WITH_PCRE2
+         regex = null;
++#endif
+         gregex = null;
+         search_entry.set_tooltip_text(e.message);
+       }
+     } else {
++#if WITH_PCRE2
+       regex = null;
++#endif
+       gregex = null;
+       search_entry.set_tooltip_text(null);
+     }
+ 
+-    if (!App.Options.no_pcre) {
+-      has_regex = regex != null;
++#if WITH_PCRE2
++    if (!App.Options.no_pcre)
+       terminal.search_set_regex(regex, 0);
+-    } else {
+-      has_regex = gregex != null;
++    else
++#endif
+       terminal.search_set_gregex(gregex, 0);
+-    }
+ 
+     update_sensitivity();
+   }
+@@ -373,7 +396,7 @@ class Window : Gtk.ApplicationWindow
+     for (int i = 0; i < dingus.length; ++i) {
+       try {
+         int tag;
+-
++#if WITH_PCRE2
+         if (!App.Options.no_pcre) {
+           Vte.Regex regex;
+ 
+@@ -388,7 +411,9 @@ class Window : Gtk.ApplicationWindow
+           }
+ 
+           tag = terminal.match_add_regex(regex, 0);
+-        } else {
++        } else 
++#endif
++        {
+           GLib.Regex regex;
+ 
+           regex = new GLib.Regex(dingus[i],
+diff --git a/configure.ac b/configure.ac
+index 7dc3956..c4ce941 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -270,6 +270,26 @@ fi
+ 
+ AM_CONDITIONAL([WITH_GNUTLS],[test "$with_gnutls" = "yes"])
+ 
++# PCRE2
++
++AC_MSG_CHECKING([whether PCRE2 support is requested])
++AC_ARG_WITH([pcre2],
++  [AS_HELP_STRING([--without-pcre2],[Disable pcre2 support])],
++  [],[with_pcre2=yes])
++AC_MSG_RESULT([$with_pcre2])
++
++PCRE2_PKGS=
++if test "$with_pcre2" = "yes"; then
++  PCRE2_PKGS="libpcre2-8 >= $PCRE2_REQUIRED"
++
++  PKG_CHECK_MODULES([PCRE2],[$PCRE2_PKGS],,
++    [AC_MSG_ERROR([libpcre2-8 version $PCRE2_REQUIRED requested but not found. Use --without-pcre2 to disable PCRE2])])
++
++  AC_DEFINE([WITH_PCRE2],[1],[Define to 1 to enable pcre2 support])
++fi
++
++AM_CONDITIONAL([WITH_PCRE2],[test "$with_pcre2" = "yes"])
++
+ # GLIB tools
+ 
+ AC_PATH_PROG([GLIB_GENMARSHAL],[glib-genmarshal])
+@@ -303,7 +323,7 @@ AC_CHECK_FUNCS([ceil floor round])
+ 
+ # Search for the required modules.
+ 
+-VTE_PKGS="glib-2.0 >= $GLIB_REQUIRED gobject-2.0 pango >= $PANGO_REQUIRED gtk+-$GTK_API_VERSION >= $GTK_REQUIRED gobject-2.0 gio-2.0 gio-unix-2.0 zlib libpcre2-8 >= $PCRE2_REQUIRED $GNUTLS_PKGS"
++VTE_PKGS="glib-2.0 >= $GLIB_REQUIRED gobject-2.0 pango >= $PANGO_REQUIRED gtk+-$GTK_API_VERSION >= $GTK_REQUIRED gobject-2.0 gio-2.0 gio-unix-2.0 zlib $GNUTLS_PKGS $PCRE2_PKGS"
+ PKG_CHECK_MODULES([VTE],[$VTE_PKGS])
+ AC_SUBST([VTE_PKGS])
+ 
+@@ -483,6 +503,7 @@ cat <<EOF | tee -a config.log
+ 
+ Configuration for libvte $VERSION for gtk+-$GTK_API_VERSION
+ 	GNUTLS: $with_gnutls
++        PCRE2: $with_pcre2
+ 	Installing Glade catalogue: $enable_glade_catalogue
+ 	Debugging: $enable_debug
+ 	Introspection: $enable_introspection
+diff --git a/src/vte.cc b/src/vte.cc
+index d8fc4fc..3ef72da 100644
+--- a/src/vte.cc
++++ b/src/vte.cc
+@@ -1053,10 +1053,14 @@ regex_match_clear_cursor (struct vte_match_regex *regex)
+ static void
+ regex_and_flags_clear(struct vte_regex_and_flags *regex)
+ {
+-        if (regex->regex) {
+-                vte_regex_unref(regex->regex);
+-                regex->regex = nullptr;
++        if (regex->mode == VTE_REGEX_PCRE2) {
++                vte_regex_unref(regex->pcre.regex);
++                regex->pcre.regex = NULL;
++        } else if (regex->mode == VTE_REGEX_GREGEX) {
++                g_regex_unref(regex->gregex.regex);
++                regex->gregex.regex = NULL;
+         }
++        regex->mode = VTE_REGEX_UNDECIDED;
+ }
+ 
+ static void
+@@ -1152,6 +1156,9 @@ VteTerminalPrivate::regex_match_add(struct vte_match_regex *new_regex_match)
+         struct vte_match_regex *regex_match;
+         guint ret, len;
+ 
++        g_assert(m_match_regex_mode == VTE_REGEX_UNDECIDED || m_match_regex_mode == new_regex_match->regex.mode);
++        m_match_regex_mode = new_regex_match->regex.mode;
++
+         /* Search for a hole. */
+         len = m_match_regexes->len;
+         for (ret = 0; ret < len; ret++) {
+@@ -1366,6 +1373,8 @@ VteTerminalPrivate::match_rowcol_to_offset(vte::grid::column_t column,
+         return true;
+ }
+ 
++#ifdef WITH_PCRE2
++
+ /* creates a pcre match context with appropriate limits */
+ pcre2_match_context_8 *
+ VteTerminalPrivate::create_match_context()
+@@ -1537,9 +1546,11 @@ VteTerminalPrivate::match_check_internal_pcre(vte::grid::column_t column,
+ 			continue;
+ 		}
+ 
++                g_assert_cmpint(regex->regex.mode, ==, VTE_REGEX_PCRE2);
++
+                 if (match_check_pcre(match_data, match_context,
+-                                     regex->regex.regex,
+-                                     regex->regex.match_flags,
++                                     regex->regex.pcre.regex,
++                                     regex->regex.pcre.match_flags,
+                                      sattr, eattr, offset,
+                                      &dingu_match,
+                                      start, end,
+@@ -1585,6 +1596,180 @@ VteTerminalPrivate::match_check_internal_pcre(vte::grid::column_t column,
+ 	return dingu_match;
+ }
+ 
++#endif /* WITH_PCRE2 */
++
++bool
++VteTerminalPrivate::match_check_gregex(GRegex *regex,
++                   GRegexMatchFlags match_flags,
++                   gsize sattr,
++                   gsize eattr,
++                   gsize offset,
++                   char **result_ptr,
++                   gsize *start,
++                   gsize *end,
++                   gsize *sblank_ptr,
++                   gsize *eblank_ptr)
++{
++        GMatchInfo *match_info;
++        const char *line;
++        gsize line_length;
++        gint sblank = G_MININT, eblank = G_MAXINT;
++
++        line = m_match_contents;
++        line_length = eattr;
++
++        /* We'll only match the first item in the buffer which
++         * matches, so we'll have to skip each match until we
++         * stop getting matches. */
++        if (!g_regex_match_full(regex,
++                                line, line_length, /* subject, length */
++                                sattr, /* start position */
++                                match_flags,
++                                &match_info,
++                                NULL)) {
++                g_match_info_free(match_info);
++                return FALSE;
++        }
++
++        while (g_match_info_matches(match_info)) {
++                gint ko = offset;
++                gint rm_so, rm_eo;
++
++                if (g_match_info_fetch_pos (match_info, 0, &rm_so, &rm_eo)) {
++                        /* The offsets should be "sane". */
++                        g_assert(rm_so < (int)eattr);
++                        g_assert(rm_eo <= (int)eattr);
++                        _VTE_DEBUG_IF(VTE_DEBUG_REGEX) {
++                                gchar *result;
++                                struct _VteCharAttributes *_sattr, *_eattr;
++                                result = g_strndup(line + rm_so, rm_eo - rm_so);
++                                _sattr = &g_array_index(m_match_attributes,
++							struct _VteCharAttributes,
++							rm_so);
++                                _eattr = &g_array_index(m_match_attributes,
++							struct _VteCharAttributes,
++							rm_eo - 1);
++                                g_printerr("Match `%s' from %d(%ld,%ld) to %d(%ld,%ld) (%" G_GSIZE_FORMAT ").\n",
++                                           result,
++                                           rm_so,
++                                           _sattr->column,
++                                           _sattr->row,
++                                           rm_eo - 1,
++                                           _eattr->column,
++                                           _eattr->row,
++                                           offset);
++                                g_free(result);
++
++                        }
++                        /* If the pointer is in this substring,
++                         * then we're done. */
++                        if (ko >= rm_so && ko < rm_eo) {
++                                *start = rm_so;
++                                *end = rm_eo - 1;
++                                *result_ptr = g_match_info_fetch(match_info, 0);
++
++                                g_match_info_free(match_info);
++                                return true;
++                        }
++
++                        if (ko >= rm_eo && rm_eo > sblank) {
++                                sblank = rm_eo;
++                        }
++                        if (ko < rm_so && rm_so < eblank) {
++                                eblank = rm_so;
++                        }
++                }
++
++                g_match_info_next(match_info, NULL);
++        }
++
++        g_match_info_free(match_info);
++
++        *sblank_ptr = sblank;
++        *eblank_ptr = eblank;
++        return false;
++}
++
++char *
++VteTerminalPrivate::match_check_internal_gregex(vte::grid::column_t column,
++                                                vte::grid::row_t row,
++                                                int *tag,
++                                                gsize *start,
++                                                gsize *end)
++{
++        guint i;
++	struct vte_match_regex *regex = nullptr;
++	gsize sattr, eattr, offset, start_blank, end_blank;
++        char *dingu_match = nullptr;
++
++	_vte_debug_print(VTE_DEBUG_REGEX,
++                         "Checking for gregex match at (%ld,%ld).\n", row, column);
++
++        if (!match_rowcol_to_offset(column, row,
++                                    &offset, &sattr, &eattr))
++                return nullptr;
++
++	start_blank = sattr;
++	end_blank = eattr;
++
++	/* Now iterate over each regex we need to match against. */
++	for (i = 0; i < m_match_regexes->len; i++) {
++                gsize sblank = 0, eblank = G_MAXSIZE;
++
++		regex = &g_array_index(m_match_regexes,
++				       struct vte_match_regex,
++				       i);
++		/* Skip holes. */
++		if (regex->tag < 0) {
++			continue;
++		}
++
++                g_assert_cmpint(regex->regex.mode, ==, VTE_REGEX_GREGEX);
++
++                if (match_check_gregex(regex->regex.gregex.regex,
++                                       regex->regex.gregex.match_flags,
++                                       sattr, eattr, offset,
++                                       &dingu_match,
++                                       start, end,
++                                       &sblank, &eblank)) {
++                        _vte_debug_print(VTE_DEBUG_REGEX, "Matched dingu with tag %d\n", regex->tag);
++                        set_cursor_from_regex_match(regex);
++                        *tag = regex->tag;
++                        break;
++                }
++
++                if (sblank > start_blank) {
++                        start_blank = sblank;
++                }
++                if (eblank < end_blank) {
++                        end_blank = eblank;
++                }
++	}
++
++        if (dingu_match == nullptr) {
++                /* If we get here, there was no dingu match.
++                 * Record smallest span where none of the dingus match.
++                 */
++                *start = start_blank;
++                *end = end_blank - 1;
++
++                _VTE_DEBUG_IF(VTE_DEBUG_REGEX) {
++                        struct _VteCharAttributes *_sattr, *_eattr;
++                        _sattr = &g_array_index(m_match_attributes,
++                                                struct _VteCharAttributes,
++                                                start_blank);
++                        _eattr = &g_array_index(m_match_attributes,
++                                                struct _VteCharAttributes,
++                                                end_blank - 1);
++                        g_printerr("No-match region from %" G_GSIZE_FORMAT "(%ld,%ld) to %" G_GSIZE_FORMAT "(%ld,%ld)\n",
++                                   start_blank, _sattr->column, _sattr->row,
++                                   end_blank - 1, _eattr->column, _eattr->row);
++                }
++        }
++
++	return dingu_match;
++}
++
+ /*
+  * vte_terminal_match_check_internal:
+  * @terminal:
+@@ -1620,7 +1805,14 @@ VteTerminalPrivate::match_check_internal(vte::grid::column_t column,
+         *start = 0;
+         *end = 0;
+ 
+-        return match_check_internal_pcre(column, row, tag, start, end);
++#ifdef WITH_PCRE2
++        if (G_LIKELY(m_match_regex_mode == VTE_REGEX_PCRE2))
++                return match_check_internal_pcre(column, row, tag, start, end);
++#endif
++        if (m_match_regex_mode == VTE_REGEX_GREGEX)
++                return match_check_internal_gregex(column, row, tag, start, end);
++
++        return nullptr;
+ }
+ 
+ char *
+@@ -1825,6 +2017,7 @@ VteTerminalPrivate::regex_match_check_extra(GdkEvent *event,
+                                             guint32 match_flags,
+                                             char **matches)
+ {
++#ifdef WITH_PCRE2
+ 	gsize offset, sattr, eattr;
+         pcre2_match_data_8 *match_data;
+         pcre2_match_context_8 *match_context;
+@@ -1874,6 +2067,58 @@ VteTerminalPrivate::regex_match_check_extra(GdkEvent *event,
+         pcre2_match_context_free_8(match_context);
+ 
+         return any_matches;
++#else
++        return false;
++#endif
++}
++
++bool
++VteTerminalPrivate::regex_match_check_extra(GdkEvent *event,
++                                            GRegex **regexes,
++                                            gsize n_regexes,
++                                            GRegexMatchFlags match_flags,
++                                            char **matches)
++{
++	gsize offset, sattr, eattr;
++        gboolean any_matches = FALSE;
++        long col, row;
++        guint i;
++
++        g_assert(event);
++        g_assert(regexes != nullptr || n_regexes == 0);
++        g_assert(matches != nullptr);
++
++        if (!rowcol_from_event(event, &col, &row))
++                return false;
++
++	if (m_match_contents == nullptr) {
++		match_contents_refresh();
++	}
++
++        if (!match_rowcol_to_offset(col, row,
++                                    &offset, &sattr, &eattr))
++                return false;
++
++        for (i = 0; i < n_regexes; i++) {
++                gsize start, end, sblank, eblank;
++                char *match_string;
++
++                g_return_val_if_fail(regexes[i] != nullptr, FALSE);
++
++                if (match_check_gregex(
++                                       regexes[i], match_flags,
++                                       sattr, eattr, offset,
++                                       &match_string,
++                                       &start, &end,
++                                       &sblank, &eblank)) {
++                        _vte_debug_print(VTE_DEBUG_REGEX, "Matched gregex with text: %s\n", match_string);
++                        matches[i] = match_string;
++                        any_matches = true;
++                } else
++                        matches[i] = nullptr;
++        }
++
++        return any_matches;
+ }
+ 
+ /* Emit an adjustment changed signal on our adjustment object. */
+@@ -7882,6 +8127,7 @@ VteTerminalPrivate::VteTerminalPrivate(VteTerminal *t) :
+         save_cursor(&m_alternate_screen);
+ 
+ 	/* Matching data. */
++        m_match_regex_mode = VTE_REGEX_UNDECIDED;
+ 	m_match_regexes = g_array_new(FALSE, TRUE,
+ 					 sizeof(struct vte_match_regex));
+         m_match_tag = -1;
+@@ -7889,8 +8135,7 @@ VteTerminalPrivate::VteTerminalPrivate(VteTerminal *t) :
+ 	match_hilite_clear(); // FIXMEchpe unnecessary
+ 
+         /* Search data */
+-        m_search_regex.regex = nullptr;
+-        m_search_regex.match_flags = 0;
++        m_search_regex.mode = VTE_REGEX_UNDECIDED;
+ 
+ 	/* Rendering data */
+ 	m_draw = _vte_draw_new();
+@@ -10723,6 +10968,8 @@ VteTerminalPrivate::write_contents_sync (GOutputStream *stream,
+ 
+ /* TODO Add properties & signals */
+ 
++#ifdef WITH_PCRE2
++
+ /*
+  * VteTerminalPrivate::search_set_regex:
+  * @regex: (allow-none): a #VteRegex, or %nullptr
+@@ -10738,15 +10985,50 @@ VteTerminalPrivate::search_set_regex (VteRegex *regex,
+ 
+         rx = &m_search_regex;
+ 
+-        if (rx->regex == regex &&
+-            rx->match_flags == flags)
++        if (rx->mode == VTE_REGEX_PCRE2 &&
++            rx->pcre.regex == regex &&
++            rx->pcre.match_flags == flags)
+                 return false;
+ 
+         regex_and_flags_clear(rx);
+ 
+-        if (regex != nullptr) {
+-                rx->regex = vte_regex_ref(regex);
+-                rx->match_flags = flags;
++        if (regex != NULL) {
++                rx->mode = VTE_REGEX_PCRE2;
++                rx->pcre.regex = vte_regex_ref(regex);
++                rx->pcre.match_flags = flags;
++        }
++
++	invalidate_all();
++
++        return true;
++}
++
++#endif /* WITH_PCRE2 */
++
++/*
++ * VteTerminalPrivate::search_set_gregex:
++ * @gregex: (allow-none): a #GRegex, or %nullptr
++ * @gflags: flags from #GRegexMatchFlags
++ *
++ * Sets the #GRegex regex to search for. Unsets the search regex when passed %nullptr.
++ */
++bool
++VteTerminalPrivate::search_set_gregex(GRegex *gregex,
++                                      GRegexMatchFlags gflags)
++{
++        struct vte_regex_and_flags *rx = &m_search_regex;
++
++        if (rx->mode == VTE_REGEX_GREGEX &&
++            rx->gregex.regex == gregex &&
++            rx->gregex.match_flags == gflags)
++                return false;
++
++        regex_and_flags_clear(rx);
++
++        if (gregex != NULL) {
++                rx->mode = VTE_REGEX_GREGEX;
++                rx->gregex.regex = g_regex_ref(gregex);
++                rx->gregex.match_flags = gflags;
+         }
+ 
+ 	invalidate_all();
+@@ -10765,8 +11047,11 @@ VteTerminalPrivate::search_set_wrap_around(bool wrap)
+ }
+ 
+ bool
+-VteTerminalPrivate::search_rows(pcre2_match_context_8 *match_context,
++VteTerminalPrivate::search_rows(
++#ifdef WITH_PCRE2
++                                pcre2_match_context_8 *match_context,
+                                 pcre2_match_data_8 *match_data,
++#endif
+                                 vte::grid::row_t start_row,
+                                 vte::grid::row_t end_row,
+                                 bool backward)
+@@ -10788,40 +11073,73 @@ VteTerminalPrivate::search_rows(pcre2_match_context_8 *match_context,
+                             nullptr,
+                             &row_text_length);
+ 
+-        int (* match_fn) (const pcre2_code_8 *,
+-                          PCRE2_SPTR8, PCRE2_SIZE, PCRE2_SIZE, uint32_t,
+-                          pcre2_match_data_8 *, pcre2_match_context_8 *);
+-        gsize *ovector, so, eo;
+-        int r;
++#ifdef WITH_PCRE2
++        if (G_LIKELY(m_search_regex.mode == VTE_REGEX_PCRE2)) {
++                int (* match_fn) (const pcre2_code_8 *,
++                                  PCRE2_SPTR8, PCRE2_SIZE, PCRE2_SIZE, uint32_t,
++                                  pcre2_match_data_8 *, pcre2_match_context_8 *);
++                gsize *ovector, so, eo;
++                int r;
+ 
+-        if (_vte_regex_get_jited(m_search_regex.regex))
+-                match_fn = pcre2_jit_match_8;
+-        else
+-                match_fn = pcre2_match_8;
++                if (_vte_regex_get_jited(m_search_regex.pcre.regex))
++                        match_fn = pcre2_jit_match_8;
++                else
++                        match_fn = pcre2_match_8;
++
++                r = match_fn(_vte_regex_get_pcre(m_search_regex.pcre.regex),
++                             (PCRE2_SPTR8)row_text, row_text_length , /* subject, length */
++                             0, /* start offset */
++                             m_search_regex.pcre.match_flags |
++                             PCRE2_NO_UTF_CHECK | PCRE2_NOTEMPTY | PCRE2_PARTIAL_SOFT /* FIXME: HARD? */,
++                             match_data,
++                             match_context);
++
++                if (r == PCRE2_ERROR_NOMATCH)
++                        return false;
++                // FIXME: handle partial matches (PCRE2_ERROR_PARTIAL)
++                if (r < 0)
++                        return false;
++
++                ovector = pcre2_get_ovector_pointer_8(match_data);
++                so = ovector[0];
++                eo = ovector[1];
++                if (G_UNLIKELY(so == PCRE2_UNSET || eo == PCRE2_UNSET))
++                        return false;
++
++                start = so;
++                end = eo;
++                word = g_strndup(row_text, end - start);
++        } else
++#endif /* WITH_PCRE2 */
++        {
++                GMatchInfo *match_info;
++                GError *error = NULL;
+ 
+-        r = match_fn(_vte_regex_get_pcre(m_search_regex.regex),
+-                     (PCRE2_SPTR8)row_text, row_text_length , /* subject, length */
+-                     0, /* start offset */
+-                     m_search_regex.match_flags |
+-                     PCRE2_NO_UTF_CHECK | PCRE2_NOTEMPTY | PCRE2_PARTIAL_SOFT /* FIXME: HARD? */,
+-                     match_data,
+-                     match_context);
++                g_assert_cmpint(m_search_regex.mode, ==, VTE_REGEX_GREGEX);
++
++                g_regex_match_full (m_search_regex.gregex.regex, row_text, row_text_length, 0,
++                                    (GRegexMatchFlags)(m_search_regex.gregex.match_flags | G_REGEX_MATCH_NOTEMPTY),
++                                    &match_info, &error);
++                if (error) {
++                        g_printerr ("Error while matching: %s\n", error->message);
++                        g_error_free (error);
++                        g_match_info_free (match_info);
++                        g_free (row_text);
++                        return false;
++                }
+ 
+-        if (r == PCRE2_ERROR_NOMATCH)
+-                return false;
+-        // FIXME: handle partial matches (PCRE2_ERROR_PARTIAL)
+-        if (r < 0)
+-                return false;
++                if (!g_match_info_matches (match_info)) {
++                        g_match_info_free (match_info);
++                        g_free (row_text);
++                        return false;
++                }
+ 
+-        ovector = pcre2_get_ovector_pointer_8(match_data);
+-        so = ovector[0];
+-        eo = ovector[1];
+-        if (G_UNLIKELY(so == PCRE2_UNSET || eo == PCRE2_UNSET))
+-                return false;
++                word = g_match_info_fetch (match_info, 0);
++                /* This gives us the offset in the buffer */
++                g_match_info_fetch_pos (match_info, 0, &start, &end);
+ 
+-        start = so;
+-        end = eo;
+-        word = g_strndup(row_text, end - start);
++                g_match_info_free (match_info);
++        }
+ 
+ 	/* Fetch text again, with attributes */
+ 	g_free (row_text);
+@@ -10862,8 +11180,11 @@ VteTerminalPrivate::search_rows(pcre2_match_context_8 *match_context,
+ }
+ 
+ bool
+-VteTerminalPrivate::search_rows_iter(pcre2_match_context_8 *match_context,
++VteTerminalPrivate::search_rows_iter(
++#ifdef WITH_PCRE2
++                                     pcre2_match_context_8 *match_context,
+                                      pcre2_match_data_8 *match_data,
++#endif
+                                      vte::grid::row_t start_row,
+                                      vte::grid::row_t end_row,
+                                      bool backward)
+@@ -10881,8 +11202,11 @@ VteTerminalPrivate::search_rows_iter(pcre2_match_context_8 *match_context,
+ 				row = find_row_data(iter_start_row);
+ 			} while (row && row->attr.soft_wrapped);
+ 
+-			if (search_rows(match_context, match_data,
+-                                        iter_start_row, iter_end_row, backward))
++			if (search_rows(
++#ifdef WITH_PCRE2
++                                                      match_context, match_data,
++#endif
++                                                      iter_start_row, iter_end_row, backward))
+ 				return true;
+ 		}
+ 	} else {
+@@ -10895,8 +11219,11 @@ VteTerminalPrivate::search_rows_iter(pcre2_match_context_8 *match_context,
+ 				iter_end_row++;
+ 			} while (row && row->attr.soft_wrapped);
+ 
+-			if (search_rows(match_context, match_data,
+-                                        iter_start_row, iter_end_row, backward))
++			if (search_rows(
++#ifdef WITH_PCRE2
++                                                      match_context, match_data,
++#endif
++                                                      iter_start_row, iter_end_row, backward))
+ 				return true;
+ 		}
+ 	}
+@@ -10910,17 +11237,25 @@ VteTerminalPrivate::search_find (bool backward)
+         vte::grid::row_t buffer_start_row, buffer_end_row;
+         vte::grid::row_t last_start_row, last_end_row;
+         bool match_found = true;
++#ifdef WITH_PCRE2
++        pcre2_match_context_8 *match_context = nullptr;
++        pcre2_match_data_8 *match_data = nullptr;
++#endif
+ 
+-        if (m_search_regex.regex == nullptr)
+-                return false;
++	if (m_search_regex.mode == VTE_REGEX_UNDECIDED)
++		return false;
+ 
+ 	/* TODO
+ 	 * Currently We only find one result per extended line, and ignore columns
+ 	 * Moreover, the whole search thing is implemented very inefficiently.
+ 	 */
+ 
+-        auto match_context = create_match_context();
+-        auto match_data = pcre2_match_data_create_8(256 /* should be plenty */, nullptr /* general context */);
++#ifdef WITH_PCRE2
++        if (G_LIKELY(m_search_regex.mode == VTE_REGEX_PCRE2)) {
++                match_context = create_match_context();
++                match_data = pcre2_match_data_create_8(256 /* should be plenty */, nullptr /* general context */);
++        }
++#endif
+ 
+ 	buffer_start_row = _vte_ring_delta (m_screen->row_data);
+ 	buffer_end_row = _vte_ring_next (m_screen->row_data);
+@@ -10938,12 +11273,18 @@ VteTerminalPrivate::search_find (bool backward)
+ 	/* If search fails, we make an empty selection at the last searched
+ 	 * position... */
+ 	if (backward) {
+-		if (search_rows_iter (match_context, match_data,
+-                                      buffer_start_row, last_start_row, backward))
++		if (search_rows_iter (
++#ifdef WITH_PCRE2
++                                                   match_context, match_data,
++#endif
++                                                   buffer_start_row, last_start_row, backward))
+ 			goto found;
+ 		if (m_search_wrap_around &&
+-		    search_rows_iter (match_context, match_data,
+-                                      last_end_row, buffer_end_row, backward))
++		    search_rows_iter (
++#ifdef WITH_PCRE2
++                                                   match_context, match_data,
++#endif
++                                                   last_end_row, buffer_end_row, backward))
+ 			goto found;
+ 		if (m_has_selection) {
+ 			if (m_search_wrap_around)
+@@ -10953,12 +11294,18 @@ VteTerminalPrivate::search_find (bool backward)
+ 		}
+                 match_found = false;
+ 	} else {
+-		if (search_rows_iter (match_context, match_data,
+-                                      last_end_row, buffer_end_row, backward))
++		if (search_rows_iter (
++#ifdef WITH_PCRE2
++                                                   match_context, match_data,
++#endif
++                                                   last_end_row, buffer_end_row, backward))
+ 			goto found;
+ 		if (m_search_wrap_around &&
+-		    search_rows_iter (match_context, match_data,
+-                                      buffer_start_row, last_start_row, backward))
++		    search_rows_iter (
++#ifdef WITH_PCRE2
++                                                   match_context, match_data,
++#endif
++                                                   buffer_start_row, last_start_row, backward))
+ 			goto found;
+ 		if (m_has_selection) {
+ 			if (m_search_wrap_around)
+@@ -10971,8 +11318,12 @@ VteTerminalPrivate::search_find (bool backward)
+ 
+  found:
+ 
+-        pcre2_match_data_free_8(match_data);
+-        pcre2_match_context_free_8(match_context);
++#ifdef WITH_PCRE2
++        if (match_data)
++                pcre2_match_data_free_8(match_data);
++        if (match_context)
++                pcre2_match_context_free_8(match_context);
++#endif
+ 
+ 	return match_found;
+ }
+diff --git a/src/vteapp.c b/src/vteapp.c
+index 71d0e61..aa0fca5 100644
+--- a/src/vteapp.c
++++ b/src/vteapp.c
+@@ -33,7 +33,9 @@
+ #undef VTE_DISABLE_DEPRECATED
+ #include <vte/vte.h>
+ 
++#ifdef WITH_PCRE2
+ #include "vtepcre2.h"
++#endif
+ 
+ #include <glib/gi18n.h>
+ 
+@@ -46,7 +48,9 @@ static const char *builtin_dingus[] = {
+   NULL
+ };
+ 
++#ifdef WITH_PCRE2
+ static gboolean use_gregex = FALSE;
++#endif
+ 
+ static void
+ window_title_changed(GtkWidget *widget, gpointer win)
+@@ -165,15 +169,18 @@ button_pressed(GtkWidget *widget, GdkEventButton *event, gpointer data)
+ 				vte_terminal_match_remove(terminal, tag);
+ 			}
+ 		}
++#ifdef WITH_PCRE2
+                 if (!use_gregex) {
+-                        VteRegex *regex = vte_regex_new_for_match("\\d+", -1, PCRE2_UTF | PCRE2_NO_UTF_CHECK | PCRE2_MULTILINE, NULL);
++                        VteRegex *regex = vte_regex_new_for_match("\\d+", -1, PCRE2_UTF, NULL);
+                         has_extra_match = vte_terminal_event_check_regex_simple(terminal,
+                                                                                 (GdkEvent*)event,
+                                                                                 &regex, 1,
+                                                                                 0,
+                                                                                 &extra_match);
+                         vte_regex_unref(regex);
+-                } else {
++                } else
++#endif
++                {
+                         GRegex *regex = g_regex_new("\\d+", 0, 0, NULL);
+                         has_extra_match = vte_terminal_event_check_gregex_simple(terminal,
+                                                                                  (GdkEvent*)event,
+@@ -558,13 +565,15 @@ add_dingus (VteTerminal *terminal,
+         for (i = 0; dingus[i]; ++i) {
+                 GRegex *gregex = NULL;
+                 GError *error = NULL;
++#ifdef WITH_PCRE2
+                 VteRegex *regex = NULL;
+ 
+                 if (!use_gregex)
+                         regex = vte_regex_new_for_match(dingus[i], -1,
+-                                                        PCRE2_UTF | PCRE2_NO_UTF_CHECK | PCRE2_MULTILINE,
++                                                        PCRE2_UTF | PCRE2_NO_UTF_CHECK,
+                                                         &error);
+                 else
++#endif
+                         gregex = g_regex_new(dingus[i], G_REGEX_OPTIMIZE | G_REGEX_MULTILINE, 0, &error);
+ 
+                 if (error) {
+@@ -574,13 +583,17 @@ add_dingus (VteTerminal *terminal,
+                         continue;
+                 }
+ 
++#ifdef WITH_PCRE2
+                 if (!use_gregex)
+                         id = vte_terminal_match_add_regex(terminal, regex, 0);
+                 else
++#endif
+                         id = vte_terminal_match_add_gregex(terminal, gregex, 0);
+ 
++#ifdef WITH_PCRE2
+                 if (regex)
+                         vte_regex_unref(regex);
++#endif
+                 if (gregex)
+                         g_regex_unref (gregex);
+ 
+@@ -660,11 +673,13 @@ main(int argc, char **argv)
+ 			G_OPTION_ARG_STRING_ARRAY, &dingus,
+ 			"Add regex highlight", NULL
+ 		},
++#ifdef WITH_PCRE2
+ 		{
+ 			"gregex", 0, 0,
+ 			G_OPTION_ARG_NONE, &use_gregex,
+ 			"Use GRegex instead of PCRE2", NULL
+ 		},
++#endif
+ 		{
+ 			"no-rewrap", 'R', G_OPTION_FLAG_REVERSE,
+ 			G_OPTION_ARG_NONE, &rewrap,
+diff --git a/src/vtegtk.cc b/src/vtegtk.cc
+index 21282e1..e7c8766 100644
+--- a/src/vtegtk.cc
++++ b/src/vtegtk.cc
+@@ -1518,6 +1518,12 @@ vte_get_features (void)
+ #else
+                 "-GNUTLS"
+ #endif
++                " "
++#ifdef WITH_PCRE2
++                "+PCRE2"
++#else
++                "-PCRE2"
++#endif
+                 ;
+ }
+ 
+@@ -1687,7 +1693,7 @@ vte_terminal_paste_primary(VteTerminal *terminal)
+  * this expression, the text will be highlighted.
+  *
+  * Returns: an integer associated with this expression, or -1 if @gregex could not be
+- *   transformed into a #VteRegex or @gflags were incompatible
++ *   transformed into a #VteRegex or @flags were incompatible
+  *
+  * Deprecated: 0.46: Use vte_terminal_match_add_regex() or vte_terminal_match_add_regex_full() instead.
+  */
+@@ -1696,16 +1702,24 @@ vte_terminal_match_add_gregex(VteTerminal *terminal,
+                               GRegex *gregex,
+                               GRegexMatchFlags gflags)
+ {
++	struct vte_match_regex new_regex_match;
++
++        g_return_val_if_fail(VTE_IS_TERMINAL(terminal), -1);
+         g_return_val_if_fail(gregex != NULL, -1);
+ 
+-        auto regex = _vte_regex_new_gregex(VteRegexPurpose::match, gregex);
+-        if (regex == NULL)
+-                return -1;
++        auto impl = IMPL(terminal);
++        /* Can't mix GRegex and PCRE2 */
++        g_return_val_if_fail(impl->m_match_regex_mode != VTE_REGEX_PCRE2, -1);
+ 
+-        auto rv = vte_terminal_match_add_regex(terminal, regex,
+-                                               _vte_regex_translate_gregex_match_flags(gflags));
+-        vte_regex_unref(regex);
+-        return rv;
++        g_warn_if_fail(g_regex_get_compile_flags(gregex) & G_REGEX_MULTILINE);
++
++        new_regex_match.regex.mode = VTE_REGEX_GREGEX;
++        new_regex_match.regex.gregex.regex = g_regex_ref(gregex);
++        new_regex_match.regex.gregex.match_flags = gflags;
++        new_regex_match.cursor_mode = VTE_REGEX_CURSOR_GDKCURSORTYPE;
++        new_regex_match.cursor.cursor_type = VTE_DEFAULT_CURSOR;
++
++        return impl->regex_match_add(&new_regex_match);
+ }
+ 
+ /**
+@@ -1732,12 +1746,14 @@ vte_terminal_match_add_regex(VteTerminal *terminal,
+ 	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), -1);
+ 	g_return_val_if_fail(regex != NULL, -1);
+         g_return_val_if_fail(_vte_regex_has_purpose(regex, VteRegexPurpose::match), -1);
+-        g_warn_if_fail(_vte_regex_get_compile_flags(regex) & PCRE2_MULTILINE);
+ 
+         auto impl = IMPL(terminal);
++        /* Can't mix GRegex and PCRE2 */
++        g_return_val_if_fail(impl->m_match_regex_mode != VTE_REGEX_GREGEX, -1);
+ 
+-        new_regex_match.regex.regex = vte_regex_ref(regex);
+-        new_regex_match.regex.match_flags = flags;
++        new_regex_match.regex.mode = VTE_REGEX_PCRE2;
++        new_regex_match.regex.pcre.regex = vte_regex_ref(regex);
++        new_regex_match.regex.pcre.match_flags = flags;
+         new_regex_match.cursor_mode = VTE_REGEX_CURSOR_GDKCURSORTYPE;
+         new_regex_match.cursor.cursor_type = VTE_DEFAULT_CURSOR;
+ 
+@@ -1832,10 +1848,8 @@ vte_terminal_event_check_regex_simple(VteTerminal *terminal,
+         g_return_val_if_fail(VTE_IS_TERMINAL(terminal), FALSE);
+         g_return_val_if_fail(event != NULL, FALSE);
+         g_return_val_if_fail(regexes != NULL || n_regexes == 0, FALSE);
+-        for (gsize i = 0; i < n_regexes; i++) {
++        for (gsize i = 0; i < n_regexes; i++)
+                 g_return_val_if_fail(_vte_regex_has_purpose(regexes[i], VteRegexPurpose::match), -1);
+-                g_warn_if_fail(_vte_regex_get_compile_flags(regexes[i]) & PCRE2_MULTILINE);
+-        }
+         g_return_val_if_fail(matches != NULL, FALSE);
+ 
+         return IMPL(terminal)->regex_match_check_extra(event, regexes, n_regexes, match_flags, matches);
+@@ -1850,9 +1864,12 @@ vte_terminal_event_check_regex_simple(VteTerminal *terminal,
+  * @match_flags: the #GRegexMatchFlags to use when matching the regexes
+  * @matches: (out caller-allocates) (array length=n_regexes): a location to store the matches
+  *
+- * This function does nothing.
++ * Checks each regex in @regexes if the text in and around the position of
++ * the event matches the regular expressions.  If a match exists, the matched
++ * text is stored in @matches at the position of the regex in @regexes; otherwise
++ * %NULL is stored there.
+  *
+- * Returns: %FALSE
++ * Returns: %TRUE iff any of the regexes produced a match
+  *
+  * Since: 0.44
+  * Deprecated: 0.46: Use vte_terminal_event_check_regex_simple() instead.
+@@ -1870,7 +1887,7 @@ vte_terminal_event_check_gregex_simple(VteTerminal *terminal,
+         g_return_val_if_fail(regexes != NULL || n_regexes == 0, FALSE);
+         g_return_val_if_fail(matches != NULL, FALSE);
+ 
+-        return FALSE;
++        return IMPL(terminal)->regex_match_check_extra(event, regexes, n_regexes, match_flags, matches);
+ }
+ 
+ /**
+@@ -1967,7 +1984,7 @@ vte_terminal_match_remove_all(VteTerminal *terminal)
+  * @terminal: a #VteTerminal
+  *
+  * Searches the previous string matching the search regex set with
+- * vte_terminal_search_set_regex().
++ * vte_terminal_search_set_gregex().
+  *
+  * Returns: %TRUE if a match was found
+  */
+@@ -1983,7 +2000,7 @@ vte_terminal_search_find_previous (VteTerminal *terminal)
+  * @terminal: a #VteTerminal
+  *
+  * Searches the next string matching the search regex set with
+- * vte_terminal_search_set_regex().
++ * vte_terminal_search_set_gregex().
+  *
+  * Returns: %TRUE if a match was found
+  */
+@@ -2009,11 +2026,12 @@ vte_terminal_search_set_regex (VteTerminal *terminal,
+                                VteRegex    *regex,
+                                guint32      flags)
+ {
++#ifdef WITH_PCRE2
+         g_return_if_fail(VTE_IS_TERMINAL(terminal));
+-        g_return_if_fail(regex == nullptr || _vte_regex_has_purpose(regex, VteRegexPurpose::search));
+-        g_warn_if_fail(regex == nullptr || _vte_regex_get_compile_flags(regex) & PCRE2_MULTILINE);
++        g_return_if_fail(regex == NULL || _vte_regex_has_purpose(regex, VteRegexPurpose::search));
+ 
+         IMPL(terminal)->search_set_regex(regex, flags);
++#endif
+ }
+ 
+ /**
+@@ -2030,7 +2048,10 @@ vte_terminal_search_get_regex(VteTerminal *terminal)
+ 	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), NULL);
+ 
+         auto impl = IMPL(terminal);
+-        return impl->m_search_regex.regex;
++        if (G_LIKELY(impl->m_search_regex.mode == VTE_REGEX_PCRE2))
++                return impl->m_search_regex.pcre.regex;
++        else
++                return NULL;
+ }
+ 
+ /**
+@@ -2048,22 +2069,16 @@ vte_terminal_search_set_gregex (VteTerminal *terminal,
+ 				GRegex      *gregex,
+                                 GRegexMatchFlags gflags)
+ {
+-        VteRegex *regex = nullptr;
+-        if (gregex)
+-                regex = _vte_regex_new_gregex(VteRegexPurpose::search, gregex);
+-
+-        vte_terminal_search_set_regex(terminal, regex,
+-                                      _vte_regex_translate_gregex_match_flags(gflags));
++        g_return_if_fail(VTE_IS_TERMINAL(terminal));
+ 
+-        if (regex)
+-                vte_regex_unref(regex);
++        IMPL(terminal)->search_set_gregex(gregex, gflags);
+ }
+ 
+ /**
+  * vte_terminal_search_get_gregex:
+  * @terminal: a #VteTerminal
+  *
+- * Returns: (transfer none): %NULL
++ * Returns: (transfer none): the search #GRegex regex set in @terminal, or %NULL
+  *
+  * Deprecated: 0.46: use vte_terminal_search_get_regex() instead.
+  */
+@@ -2072,7 +2087,11 @@ vte_terminal_search_get_gregex (VteTerminal *terminal)
+ {
+ 	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), NULL);
+ 
+-        return NULL;
++        auto impl = IMPL(terminal);
++        if (G_LIKELY(impl->m_search_regex.mode == VTE_REGEX_GREGEX))
++                return impl->m_search_regex.gregex.regex;
++        else
++                return NULL;
+ }
+ 
+ /**
+@@ -2476,7 +2495,7 @@ vte_terminal_spawn_async(VteTerminal *terminal,
+ /**
+  * vte_terminal_feed:
+  * @terminal: a #VteTerminal
+- * @data: (array length=length) (element-type guint8) (allow-none): a string in the terminal's current encoding
++ * @data: (array length=length) (element-type guint8): a string in the terminal's current encoding
+  * @length: the length of the string, or -1 to use the full length or a nul-terminated string
+  *
+  * Interprets @data as if it were data received from a child process.  This
+@@ -2497,7 +2516,7 @@ vte_terminal_feed(VteTerminal *terminal,
+ /**
+  * vte_terminal_feed_child:
+  * @terminal: a #VteTerminal
+- * @text: (element-type utf8) (allow-none): data to send to the child
++ * @text: data to send to the child
+  * @length: length of @text in bytes, or -1 if @text is NUL-terminated
+  *
+  * Sends a block of UTF-8 text to the child as if it were entered by the user
+@@ -2517,7 +2536,7 @@ vte_terminal_feed_child(VteTerminal *terminal,
+ /**
+  * vte_terminal_feed_child_binary:
+  * @terminal: a #VteTerminal
+- * @data: (array length=length) (element-type guint8) (allow-none): data to send to the child
++ * @data: data to send to the child
+  * @length: length of @data
+  *
+  * Sends a block of binary data to the child.
+diff --git a/src/vteinternal.hh b/src/vteinternal.hh
+index ff5b93c..2682fee 100644
+--- a/src/vteinternal.hh
++++ b/src/vteinternal.hh
+@@ -27,8 +27,16 @@
+ #include "vteconv.h"
+ #include "buffer.h"
+ 
++#ifdef WITH_PCRE2
+ #include "vtepcre2.h"
+ #include "vteregexinternal.hh"
++#endif
++
++typedef enum {
++        VTE_REGEX_UNDECIDED,
++        VTE_REGEX_PCRE2,
++        VTE_REGEX_GREGEX
++} VteRegexMode;
+ 
+ typedef enum {
+         VTE_REGEX_CURSOR_GDKCURSOR,
+@@ -47,8 +55,17 @@ typedef enum {
+ } MouseTrackingMode;
+ 
+ struct vte_regex_and_flags {
+-        VteRegex *regex;
+-        guint32 match_flags;
++        VteRegexMode mode;
++        union { /* switched on @mode */
++                struct {
++                        VteRegex *regex;
++                        guint32 match_flags;
++                } pcre;
++                struct {
++                        GRegex *regex;
++                        GRegexMatchFlags match_flags;
++                } gregex;
++        };
+ };
+ 
+ /* A match regex, with a tag. */
+@@ -435,6 +452,7 @@ public:
+ 	/* State variables for handling match checks. */
+         char* m_match_contents;
+         GArray* m_match_attributes;
++        VteRegexMode m_match_regex_mode;
+         GArray* m_match_regexes;
+         char* m_match;
+         int m_match_tag;
+@@ -977,6 +995,11 @@ public:
+                                      gsize n_regexes,
+                                      guint32 match_flags,
+                                      char **matches);
++        bool regex_match_check_extra(GdkEvent *event,
++                                     GRegex **regexes,
++                                     gsize n_regexes,
++                                     GRegexMatchFlags match_flags,
++                                     char **matches);
+ 
+         int regex_match_add(struct vte_match_regex *new_regex_match);
+         struct vte_match_regex *regex_match_get(int tag);
+@@ -998,7 +1021,7 @@ public:
+                                     gsize *offset_ptr,
+                                     gsize *sattr_ptr,
+                                     gsize *eattr_ptr);
+-
++#ifdef WITH_PCRE2
+         pcre2_match_context_8 *create_match_context();
+         bool match_check_pcre(pcre2_match_data_8 *match_data,
+                               pcre2_match_context_8 *match_context,
+@@ -1017,6 +1040,22 @@ public:
+                                         int *tag,
+                                         gsize *start,
+                                         gsize *end);
++#endif
++        bool match_check_gregex(GRegex *regex,
++                                GRegexMatchFlags match_flags,
++                                gsize sattr,
++                                gsize eattr,
++                                gsize offset,
++                                char **result,
++                                gsize *start,
++                                gsize *end,
++                                gsize *sblank_ptr,
++                                gsize *eblank_ptr);
++        char *match_check_internal_gregex(vte::grid::column_t column,
++                                          vte::grid::row_t row,
++                                          int *tag,
++                                          gsize *start,
++                                          gsize *end);
+ 
+         char *match_check_internal(vte::grid::column_t column,
+                                    vte::grid::row_t row,
+@@ -1038,16 +1077,26 @@ public:
+         void feed_focus_event_initial();
+         void maybe_feed_focus_event(bool in);
+ 
++#ifdef WITH_PCRE2
+         bool search_set_regex (VteRegex *regex,
+                                guint32 flags);
++#endif
++        bool search_set_gregex (GRegex *gregex,
++                                GRegexMatchFlags gflags);
+ 
+-        bool search_rows(pcre2_match_context_8 *match_context,
++        bool search_rows(
++#ifdef WITH_PCRE2
++                         pcre2_match_context_8 *match_context,
+                          pcre2_match_data_8 *match_data,
++#endif
+                          vte::grid::row_t start_row,
+                          vte::grid::row_t end_row,
+                          bool backward);
+-        bool search_rows_iter(pcre2_match_context_8 *match_context,
++        bool search_rows_iter(
++#ifdef WITH_PCRE2
++                              pcre2_match_context_8 *match_context,
+                               pcre2_match_data_8 *match_data,
++#endif
+                               vte::grid::row_t start_row,
+                               vte::grid::row_t end_row,
+                               bool backward);
+diff --git a/src/vteregex.cc b/src/vteregex.cc
+index d9c4841..672bf02 100644
+--- a/src/vteregex.cc
++++ b/src/vteregex.cc
+@@ -27,48 +27,32 @@
+ #include "vtemacros.h"
+ #include "vteenums.h"
+ #include "vteregex.h"
++
++#ifdef WITH_PCRE2
+ #include "vtepcre2.h"
++#endif /* WITH_PCRE2 */
+ 
+ #include "vteregexinternal.hh"
+ 
+ struct _VteRegex {
+         volatile int ref_count;
+         VteRegexPurpose purpose;
++#ifdef WITH_PCRE2
+         pcre2_code_8 *code;
++#endif /* WITH_PCRE2 */
+ };
+ 
++#ifdef WITH_PCRE2
+ #define DEFAULT_COMPILE_OPTIONS (PCRE2_UTF)
+ #define JIT_OPTIONS (PCRE2_JIT_COMPLETE)
+ #define DEFAULT_MATCH_OPTIONS (0)
++#else
++#define DEFAULT_COMPILE_OPTIONS (0
++#define JIT_OPTIONS (0)
++#define DEFAULT_MATCH_OPTIONS (0)
++#endif /* WITH_PCRE2 */
+ 
+-/* GRegex translation */
+-
+-typedef struct {
+-        guint32 gflag;
+-        guint32 pflag;
+-} FlagTranslation;
+-
+-static void
+-translate_flags(FlagTranslation const* const table,
+-                gsize table_len,
+-                guint32 *gflagsptr /* inout */,
+-                guint32 *pflagsptr /* inout */)
+-{
+-        auto gflags = *gflagsptr;
+-        auto pflags = *pflagsptr;
+-        for (guint i = 0; i < table_len; i++) {
+-                auto gflag = table[i].gflag;
+-                if ((gflags & gflag) == gflag) {
+-                        pflags |= table[i].pflag;
+-                        gflags &= ~gflag;
+-                }
+-        }
+-
+-        *gflagsptr = gflags;
+-        *pflagsptr = pflags;
+-}
+-
+-/* internal */
++#ifdef WITH_PCRE2
+ 
+ static VteRegex *
+ regex_new(pcre2_code_8 *code,
+@@ -104,6 +88,18 @@ set_gerror_from_pcre_error(int errcode,
+         return FALSE;
+ }
+ 
++#else
++
++static gboolean
++set_unsupported_error(GError **error)
++{
++        g_set_error_literal(error, VTE_REGEX_ERROR, VTE_REGEX_ERROR_NOT_SUPPORTED,
++                            "PCRE2 not supported");
++        return FALSE;
++}
++
++#endif /* WITH_PCRE2 */
++
+ G_DEFINE_BOXED_TYPE(VteRegex, vte_regex,
+                     vte_regex_ref, (GBoxedFreeFunc)vte_regex_unref)
+ 
+@@ -122,8 +118,9 @@ vte_regex_ref(VteRegex *regex)
+ {
+         g_return_val_if_fail (regex, NULL);
+ 
++#ifdef WITH_PCRE2
+         g_atomic_int_inc (&regex->ref_count);
+-
++#endif
+         return regex;
+ }
+ 
+@@ -141,9 +138,10 @@ vte_regex_unref(VteRegex *regex)
+ {
+         g_return_val_if_fail (regex, NULL);
+ 
++#ifdef WITH_PCRE2
+         if (g_atomic_int_dec_and_test (&regex->ref_count))
+                 regex_free (regex);
+-
++#endif
+         return NULL;
+ }
+ 
+@@ -154,6 +152,7 @@ vte_regex_new(VteRegexPurpose purpose,
+               guint32     flags,
+               GError    **error)
+ {
++#ifdef WITH_PCRE2
+         pcre2_code_8 *code;
+         int r, errcode;
+         guint32 v;
+@@ -189,66 +188,10 @@ vte_regex_new(VteRegexPurpose purpose,
+         }
+ 
+         return regex_new(code, purpose);
+-}
+-
+-VteRegex *
+-_vte_regex_new_gregex(VteRegexPurpose purpose,
+-                      GRegex *gregex)
+-{
+-        g_return_val_if_fail(gregex != NULL, NULL);
+-
+-        guint32 pflags = 0;
+-
+-        static FlagTranslation const table[] = {
+-                { G_REGEX_CASELESS,        PCRE2_CASELESS        },
+-                { G_REGEX_MULTILINE,       PCRE2_MULTILINE       },
+-                { G_REGEX_DOTALL,          PCRE2_DOTALL          },
+-                { G_REGEX_EXTENDED,        PCRE2_EXTENDED        },
+-                { G_REGEX_ANCHORED,        PCRE2_ANCHORED        },
+-                { G_REGEX_DOLLAR_ENDONLY,  PCRE2_DOLLAR_ENDONLY  },
+-                { G_REGEX_UNGREEDY,        PCRE2_UNGREEDY        },
+-                { G_REGEX_NO_AUTO_CAPTURE, PCRE2_NO_AUTO_CAPTURE },
+-                { G_REGEX_OPTIMIZE,        0                     }, /* accepted but unused */
+-                { G_REGEX_FIRSTLINE,       PCRE2_FIRSTLINE       },
+-                { G_REGEX_DUPNAMES,        PCRE2_DUPNAMES        }
+-        };
+-
+-        /* Always add the MULTILINE option */
+-        guint32 gflags = g_regex_get_compile_flags(gregex) | G_REGEX_MULTILINE;
+-        translate_flags(table, G_N_ELEMENTS(table), &gflags, &pflags);
+-
+-        if (gflags != 0) {
+-                g_warning("Incompatible GRegex compile flags left untranslated: %08x", gflags);
+-        }
+-
+-        GError *err = nullptr;
+-        auto regex = vte_regex_new(purpose, g_regex_get_pattern(gregex), -1, pflags, &err);
+-        if (regex == NULL) {
+-                g_warning("Failed to translated GRegex: %s", err->message);
+-                g_error_free(err);
+-        }
+-        return regex;
+-}
+-
+-guint32
+-_vte_regex_translate_gregex_match_flags(GRegexMatchFlags flags)
+-{
+-        static FlagTranslation const table[] = {
+-                { G_REGEX_MATCH_ANCHORED,         PCRE2_ANCHORED         },
+-                { G_REGEX_MATCH_NOTBOL,           PCRE2_NOTBOL           },
+-                { G_REGEX_MATCH_NOTEOL,           PCRE2_NOTEOL           },
+-                { G_REGEX_MATCH_NOTEMPTY,         PCRE2_NOTEMPTY         },
+-                { G_REGEX_MATCH_NOTEMPTY_ATSTART, PCRE2_NOTEMPTY_ATSTART }
+-        };
+-
+-        guint32 gflags = flags;
+-        guint32 pflags = 0;
+-        translate_flags(table, G_N_ELEMENTS(table), &gflags, &pflags);
+-        if (gflags != 0) {
+-                g_warning("Incompatible GRegex match flags left untranslated: %08x", gflags);
+-        }
+-
+-        return pflags;
++#else
++        set_unsupported_error(error);
++        return NULL;
++#endif /* WITH_PCRE2 */
+ }
+ 
+ /**
+@@ -329,6 +272,7 @@ VteRegex *
+ vte_regex_new_pcre(pcre2_code_8 *code,
+                    GError      **error)
+ {
++#ifdef WITH_PCRE2
+         guint32 flags;
+ 
+         g_return_val_if_fail(code != NULL, NULL);
+@@ -339,6 +283,10 @@ vte_regex_new_pcre(pcre2_code_8 *code,
+         g_return_val_if_fail(flags & PCRE2_NEVER_BACKSLASH_C, NULL);
+ 
+         return regex_new(code);
++#else
++        set_unsupported_error(error);
++        return NULL;
++#endif
+ }
+ #endif
+ 
+@@ -349,6 +297,7 @@ _vte_regex_has_purpose(VteRegex *regex,
+         return regex->purpose == purpose;
+ }
+ 
++#ifdef WITH_PCRE2
+ /*
+  * _vte_regex_get_pcre:
+  * @regex: a #VteRegex
+@@ -359,10 +308,15 @@ _vte_regex_has_purpose(VteRegex *regex,
+ const pcre2_code_8 *
+ _vte_regex_get_pcre(VteRegex *regex)
+ {
++#ifdef WITH_PCRE2
+         g_return_val_if_fail(regex != NULL, NULL);
+ 
+         return regex->code;
++#else
++        return NULL;
++#endif
+ }
++#endif
+ 
+ /**
+  * vte_regex_jit:
+@@ -377,6 +331,7 @@ vte_regex_jit(VteRegex *regex,
+               guint     flags,
+               GError  **error)
+ {
++#ifdef WITH_PCRE2
+         int r;
+ 
+         g_return_val_if_fail(regex != NULL, FALSE);
+@@ -386,6 +341,9 @@ vte_regex_jit(VteRegex *regex,
+                 return set_gerror_from_pcre_error(r, error);
+ 
+         return TRUE;
++#else
++        return set_unsupported_error(error);
++#endif /* WITH_PCRE2 */
+ }
+ 
+ /*
+@@ -399,6 +357,7 @@ vte_regex_jit(VteRegex *regex,
+ gboolean
+ _vte_regex_get_jited(VteRegex *regex)
+ {
++#ifdef WITH_PCRE2
+         PCRE2_SIZE s;
+         int r;
+ 
+@@ -407,20 +366,7 @@ _vte_regex_get_jited(VteRegex *regex)
+         r = pcre2_pattern_info_8(regex->code, PCRE2_INFO_JITSIZE, &s);
+ 
+         return r == 0 && s != 0;
+-}
+-
+-/*
+- * _vte_regex_get_compile_flags:
+- *
+- * Returns: the PCRE2 flags used to compile @regex
+- */
+-guint32
+-_vte_regex_get_compile_flags(VteRegex *regex)
+-{
+-        g_return_val_if_fail(regex != nullptr, 0);
+-
+-        uint32_t v;
+-        int r = pcre2_pattern_info_8(regex->code, PCRE2_INFO_ARGOPTIONS, &v);
+-
+-        return r == 0 ? v : 0u;
++#else
++        return FALSE;
++#endif
+ }
+diff --git a/src/vteregexinternal.hh b/src/vteregexinternal.hh
+index 21f43f8..88fb848 100644
+--- a/src/vteregexinternal.hh
++++ b/src/vteregexinternal.hh
+@@ -27,12 +27,6 @@ gboolean _vte_regex_has_purpose(VteRegex *regex,
+ 
+ gboolean _vte_regex_get_jited(VteRegex *regex);
+ 
+-guint32 _vte_regex_get_compile_flags (VteRegex *regex);
+-
++#ifdef WITH_PCRE2
+ const pcre2_code_8 *_vte_regex_get_pcre (VteRegex *regex);
+-
+-/* GRegex translation */
+-VteRegex *_vte_regex_new_gregex(VteRegexPurpose purpose,
+-                                GRegex *gregex);
+-
+-guint32 _vte_regex_translate_gregex_match_flags(GRegexMatchFlags flags);
++#endif

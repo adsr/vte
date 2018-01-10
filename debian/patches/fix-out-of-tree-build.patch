@@ -1,0 +1,12 @@
+Index: b/bindings/vala/Makefile.am
+===================================================================
+--- a/bindings/vala/Makefile.am
++++ b/bindings/vala/Makefile.am
+@@ -289,6 +289,7 @@
+ 	-Wno-unused-but-set-variable \
+ 	$(VTE_CFLAGS) \
+ 	$(AM_CFLAGS) \
++	-I$(top_srcdir) \
+ 	$(NULL)
+ 
+ vte_@VTE_API_MAJOR_VERSION@_@VTE_API_MINOR_VERSION@_LDFLAGS = \

@@ -1,0 +1,28 @@
+From: Andreas Henriksson <andreas@fatal.se>
+Subject: Fix FTBFS with -pthread vs. -nostdlib vs. -Wl,-z,defs
+
+https://bugzilla.gnome.org/show_bug.cgi?id=761444
+
+--- a/configure.ac
++++ b/configure.ac
+@@ -206,6 +206,20 @@
+ AC_SUBST([VTE_LDFLAGS])
+ AC_SUBST([VTE_CXXLDFLAGS])
+ 
++# Linking with both -nostdlib and -Wl,-z,defs results in
++# ./src/pty.cc:131: undefined reference to `pthread_sigmask'
++# This explicitly links in pthead which is not done automatically
++# when using -nostdlib.
++# See https://bugzilla.gnome.org/show_bug.cgi?id=761444
++AC_SEARCH_LIBS(pthread_sigmask, pthread,,
++               [AC_MSG_ERROR([cannot find pthread_sigmask in libc or libpthread])])
++if test x"$ac_cv_search_pthread_sigmask" != x"none required" ; then
++   PTHREAD_LIBS=$ac_cv_search_pthread_sigmask
++fi
++AC_SUBST(PTHREAD_LIBS)
++
++LIBS="$LIBS $PTHREAD_LIBS"
++
+ ################################################################################
+ # Core
+ ################################################################################

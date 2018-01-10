@@ -1,0 +1,3 @@
+version=4
+https://download.gnome.org/sources/vte/([\d\.]+[02468])/ \
+	vte@ANY_VERSION@\.tar\.xz

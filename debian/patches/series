@@ -1,0 +1,6 @@
+01_scroll_notebook.patch
+0001-Add-the-style-context-provider-with-FALLBACK-priorit.patch
+fix-out-of-tree-build.patch
+91_keep_fds.patch
+pthread-vs-nostdlib.patch
+revert-pcre2.patch

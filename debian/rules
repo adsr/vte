@@ -1,0 +1,57 @@
+#!/usr/bin/make -f
+
+libvte2.91N := $(shell sed -rn 's/^Package:[[:space:]]*(libvte-[0-9\.-]+)[[:space:]]*$$/\1/p' debian/control)
+udeb := $(libvte2.91N)-udeb
+GNOME_MODULE = vte
+
+DEB_BUILDDIR = debian/build
+DEB_MAKE_FLAVORS = main udeb
+
+include /usr/share/cdbs/1/rules/autoreconf.mk
+include /usr/share/cdbs/1/rules/debhelper.mk
+include /usr/share/cdbs/1/rules/utils.mk
+include /usr/share/cdbs/1/class/gnome.mk
+include /usr/share/gnome-pkg-tools/1/rules/uploaders.mk
+include /usr/share/gnome-pkg-tools/1/rules/gnome-get-source.mk
+
+DEB_DH_AUTORECONF_ARGS = --as-needed
+
+# Ensure at build time that the library has no dependencies on undefined
+# symbols, and speed up loading.
+DEB_LDFLAGS_MAINT_APPEND=-Wl,-z,defs -Wl,-O1 -Wl,--as-needed
+include /usr/share/dpkg/default.mk
+
+DEB_CONFIGURE_LIBEXECDIR := \$${prefix}/lib/$(libvte2.91N)
+DEB_DH_MAKESHLIBS_ARGS_$(libvte2.91N) += --add-udeb=$(udeb) -- -c4
+
+DEB_CONFIGURE_FLAGS_main += \
+	--libdir=\$${prefix}/lib/$(DEB_HOST_MULTIARCH) \
+	--enable-glade-catalogue \
+	--enable-gtk-doc \
+	--enable-introspection \
+	--without-pcre2 \
+	--with-gnutls
+
+# FIXME: not honoured
+#DEB_CONFIGURE_EXTRA_FLAGS_main += --libdir=\$${prefix}/lib/$(DEB_HOST_MULTIARCH)
+
+DEB_CONFIGURE_FLAGS_udeb += \
+	--disable-gtk-doc \
+	--without-pcre2 \
+	--without-gnutls
+
+DEB_MAKE_DESTDIRSKEL = $(CURDIR)/debian/tmp
+DEB_MAKE_DESTDIRSKEL_udeb = $(CURDIR)/debian/tmp/udeb
+
+DEB_DH_INSTALL_ARGS_$(udeb) += --sourcedir=debian/tmp/udeb
+
+# FIXME: not honoured
+#CFLAGS_udeb += $(CFLAGS) -Os
+CFLAGS += $(if $(findstring udeb,$(cdbs_make_curflavor)),-Os)
+
+binary-install/libvte-2.91-common::
+	mv debian/libvte-2.91-common/etc/profile.d/vte.sh \
+		debian/libvte-2.91-common/etc/profile.d/vte-2.91.sh
+
+# List any files which are not installed
+common-binary-post-install-arch:: list-missing
